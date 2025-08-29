@@ -42,21 +42,60 @@
 </br>
 
 ## Maintaining and Syncing This Fork
+This fork’s `main` branch is a mirror of the upstream repository. Main should not be touched other than for syncing with the upstream repository.
 
-This fork adds TFLint and Checkov scanning with expanded PR comment sections. To sync upstream changes while preserving your enhancements:
+This fork adds TFLint and Checkov scanning with expanded PR comment sections. 
 
-- **Via GitHub UI**: Go to this fork's main branch → Click "Sync fork" → Update branch.
-### Sync with upstream repository
-- **Via Git CLI**:
+To sync upstream changes while preserving your enhancements:
+
+1. Go to this fork's main branch → Click "Sync fork" → Update branch.
+
+> [!TIP]
+> 
+> If the main branch diverged somehow, don't use the UI, use the CLI:
+> ```bash
+> git remote add upstream git@github.com:OP5dev/TF-via-PR.> git   # original repo
+> git remote -v
+> git fetch upstream
+> git checkout main
+> git reset --hard upstream/main      # mirror exactly (no extra merge commits)
+> git push origin main --force-with-lease
+> ```
+
+<br>
+
+2. Sync changes on `main` (upstream repository) with `enhance` branch.
   ```bash
   git checkout enhance
-  git rebase main
-  # Resolve any conflicts if they arise
-  git push origin enhance --force-with-lease
+  git pull origin enhance --ff-only   # make sure local enhance is up-to-date
+
+  git switch -c sync/upstream-YYYY-MM-DD   # e.g., sync/upstream-2025-08-29
+  git rebase main                         # replay your enhance commits on top of updated main
+  # resolve conflicts → `git add <files>` → `git rebase --continue` (repeat as needed)
+
+  git push -u origin HEAD
   ```
 
-- **Workflows**: Test workflows are guarded to only run in the original repo, preventing unintended CI in this fork.
-- **Tags**: The `tag_release.yaml` workflow keeps `v1` pointing to the latest `v1.x.y` release.
+  3. Create PR into `enhance` branch.
+
+  - Open PR: `sync/upstream-YYYY-MM-DD` → `enhance`
+  - Title: `🔄 Sync upstream changes (v1.x.x)` (grab the upstream tag for clarity)
+  - Description: link the upstream release/changelog; note any conflict resolutions.
+
+  4. Squash and Merge
+  - Use Squash and merge (gives you a single “sync” commit = easy audit trail)
+  - Suggested squash commit message: 🔄 Sync upstream changes – 2025-08-29 (v1.x.x) 
+  - Update local and delete the sync branch:
+  ```bash
+  git checkout enhance
+  git pull origin enhance
+  git branch -d sync/upstream-YYYY-MM-DD
+  git push origin --delete sync/upstream-YYYY-MM-DD
+  ```
+
+
+- **Workflows**: `test_*` workflows are guarded to only run in the original repo, preventing unintended CI in this fork.
+- **Tags**: The `tag_release.yaml` workflow keeps `v1` tag pointing to the latest `v1.x.y` release.
 
 </br>
 
