@@ -216,7 +216,7 @@ jobs:
       pull-requests: write # Required to add PR comment.
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
 
       - name: Configure AWS credentials
@@ -237,19 +237,6 @@ jobs:
       - name: Setup Checkov
         run: |
           pip install checkov
-
-      # VPN required to access EKS private control plane
-      - name: Install OpenVPN
-        run: |
-          sudo apt update
-          sudo apt install -y openvpn openvpn-systemd-resolved
-
-      - name: Connect to VPN
-        uses: "kota65535/github-openvpn-connect-action@v2"
-        with:
-          config_file: .github/workflows/veruna-dev.ovpn
-          username: ${{ env.OVPN_USERNAME }}
-          password: ${{ env.OVPN_PASSWORD }}
 
       # Determine terraform command based on workflow trigger type
       - name: Determine Terraform command
