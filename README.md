@@ -41,6 +41,25 @@
 
 </br>
 
+## Maintaining and Syncing This Fork
+
+This fork adds TFLint and Checkov scanning with expanded PR comment sections. To sync upstream changes while preserving your enhancements:
+
+- **Via GitHub UI**: Go to this fork's main branch → Click "Sync fork" → Update branch.
+### Sync with upstream repository
+- **Via Git CLI**:
+  ```bash
+  git checkout enhance
+  git rebase main
+  # Resolve any conflicts if they arise
+  git push origin enhance --force-with-lease
+  ```
+
+- **Workflows**: Test workflows are guarded to only run in the original repo, preventing unintended CI in this fork.
+- **Tags**: The `tag_release.yaml` workflow keeps `v1` pointing to the latest `v1.x.y` release.
+
+</br>
+
 ## Usage Examples
 
 ### How to get started?
@@ -484,7 +503,7 @@ View [security policy and reporting instructions](SECURITY.md). Integrating secu
 - Kyler Loucks (@cloud303-kloucks) — enhancements: TFLint, Checkov, validation/outputs
 
 ## Contributors
-[![Contributors](https://contrib.rocks/image?repo=cloud303-kloucks/c303/TF-via-PR)](https://github.com/cloud303-kloucks/c303/TF-via-PR/graphs/contributors)
+[![Contributors](https://contrib.rocks/image?repo=Cloud303/TF-via-PR)](https://github.com/Cloud303/TF-via-PR/graphs/contributors)
 
 </br>
 

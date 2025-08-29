@@ -10,6 +10,7 @@ on:
 
 jobs:
   Target:
+    if: ${{ github.repository_owner == 'OP5dev' }}
     runs-on: ubuntu-24.04
 
     permissions:
