@@ -10,6 +10,8 @@ runs:
         INPUTS_PLAN_ENCRYPT: ${{ inputs.plan-encrypt }}
         INPUTS_PLAN_PARITY: ${{ inputs.plan-parity }}
         INPUTS_TOOL: ${{ inputs.tool }}
+        INPUTS_TFLINT_SCAN: ${{ inputs.tflint-scan }}
+        INPUTS_CHECKOV_SCAN: ${{ inputs.checkov-scan }}
       shell: bash
       run: |
         # Check for required tools.
@@ -20,6 +22,8 @@ runs:
         which $INPUTS_TOOL > /dev/null 2>&1 || { echo "Please install $INPUTS_TOOL before running this action as it is required for provisioning TF code."; exit 1; }
         if [[ "$INPUTS_PLAN_ENCRYPT" ]]; then which openssl > /dev/null 2>&1 || { echo "Please install openssl before running this action as it is required for plan file encryption."; exit 1; }; fi
         if [[ "$INPUTS_PLAN_PARITY" ]]; then which diff > /dev/null 2>&1 || { echo "Please install diff before running this action as it is required for comparing plan file parity."; exit 1; }; fi
+        if [[ "$INPUTS_TFLINT_SCAN" == "true" ]]; then which tflint > /dev/null 2>&1 || { echo "Please install tflint before running this action as it is required for linting TF code."; exit 1; }; fi
+        if [[ "$INPUTS_CHECKOV_SCAN" == "true" ]]; then which checkov > /dev/null 2>&1 || { echo "Please install checkov before running this action as it is required for security scanning."; exit 1; }; fi
 
     - id: arg
       env:
@@ -177,6 +181,67 @@ runs:
         echo "$INPUTS_TOOL validate${{ steps.arg.outputs.arg-chdir }}${args}" | sed 's/ -/\n -/g' > tf.command.txt
         $INPUTS_TOOL${{ steps.arg.outputs.arg-chdir }} validate${args} 2> >(tee tf.console.txt) > >(tee tf.console.txt)
 
+    - if: ${{ inputs.tflint-scan == 'true' && contains(fromJSON('["plan", "apply", "init"]'), inputs.command) }}
+      id: tflint
+      shell: bash
+      run: |
+        # TFLint scan.
+        trap 'exit_code="$?"; echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"' EXIT
+
+        # Get absolute path for output files
+        output_dir=$(pwd)
+        working_dir="${{ inputs.arg-chdir || inputs.working-directory || '.' }}"
+
+        # Change to working directory if specified
+        cd "$working_dir"
+
+        # Initialize TFLint
+        tflint --init
+
+        # Build TFLint arguments
+        tflint_args="--format compact"
+        if [[ -n "${{ inputs.tflint-config }}" ]]; then
+          tflint_args="$tflint_args --config ${{ inputs.tflint-config }}"
+        fi
+        if [[ -n "${{ inputs.tflint-var-file }}" ]]; then
+          tflint_args="$tflint_args --var-file ${{ inputs.tflint-var-file }}"
+        fi
+
+        # Run TFLint with absolute paths
+        echo "tflint ${tflint_args}" > "${output_dir}/tflint.command.txt"
+        tflint ${tflint_args} 2> >(tee "${output_dir}/tflint.console.txt") > >(tee "${output_dir}/tflint.console.txt") || true
+
+        # Return to original directory
+        cd "$output_dir"
+
+        # Clean up TFLint output - remove debug lines and noise
+        if [[ -s tflint.console.txt ]]; then
+          # Remove debug output, summary lines, and empty lines, keep only actual issues
+          grep -E "^[^:]+:[0-9]+:[0-9]+: (Error|Warning|Notice)" tflint.console.txt > tflint.clean.txt || true
+
+          # If we have clean output, use it; otherwise keep original
+          if [[ -s tflint.clean.txt ]]; then
+            mv tflint.clean.txt tflint.console.txt
+          fi
+
+          # Parse results for summary
+          error_count=$(grep -c "Error:" tflint.console.txt 2>/dev/null || echo "0")
+          warning_count=$(grep -c "Warning:" tflint.console.txt 2>/dev/null || echo "0")
+          notice_count=$(grep -c "Notice:" tflint.console.txt 2>/dev/null || echo "0")
+
+          if [[ $error_count -gt 0 ]]; then
+            echo "summary=❌ $error_count errors, ⚠️ $warning_count warnings, ℹ️ $notice_count notices" >> "$GITHUB_OUTPUT"
+          elif [[ $warning_count -gt 0 ]]; then
+            echo "summary=⚠️ $warning_count warnings, ℹ️ $notice_count notices" >> "$GITHUB_OUTPUT"
+          elif [[ $notice_count -gt 0 ]]; then
+            echo "summary=ℹ️ $notice_count notices" >> "$GITHUB_OUTPUT"
+          else
+            echo "summary=✅ No issues found" >> "$GITHUB_OUTPUT"
+          fi
+        else
+          echo "summary=✅ No issues found" >> "$GITHUB_OUTPUT"
+        fi
+
     - if: ${{ inputs.command == 'plan' }}
       id: plan
       env:
@@ -236,6 +301,62 @@ runs:
           -e 's/^  # \(.* be updated\|.* be replaced\)/! \1/' \
           -e 's/^  # \(.* be read\)/~ \1/' \
           -e 's/^  # \(.*\)/# \1/' > tf.diff.txt || true
+
+    - if: ${{ (inputs.checkov-scan == 'true') && (steps.plan.outcome == 'success' || steps.download.outcome == 'success' || inputs.command == 'init') }}
+      id: checkov
+      shell: bash
+      run: |
+        # Checkov security scan.
+        trap 'exit_code="$?"; echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"' EXIT
+
+        # Build Checkov arguments
+        working_dir="${{ inputs.arg-chdir || inputs.working-directory || '.' }}"
+        checkov_args="--framework ${{ inputs.checkov-framework }} --directory $working_dir"
+
+        if [[ -n "${{ inputs.checkov-config }}" ]]; then
+          checkov_args="$checkov_args --config-file ${{ inputs.checkov-config }}"
+        fi
+
+        if [[ "${{ inputs.checkov-quiet }}" == "true" ]]; then
+          checkov_args="$checkov_args --quiet"
+        fi
+
+        if [[ -n "${{ inputs.checkov-skip-check }}" ]]; then
+          checkov_args="$checkov_args --skip-check ${{ inputs.checkov-skip-check }}"
+        fi
+
+        # Run Checkov with both CLI and JSON output
+        echo "checkov ${checkov_args} --output cli --output json --output-file-path console,checkov-results.json" > checkov.command.txt
+        checkov ${checkov_args} --output cli --output json --output-file-path console,checkov-results.json 2> >(tee checkov.console.txt) > >(tee checkov.console.txt) || true
+
+        # Parse results for summary
+        if [[ -f checkov-results.json ]]; then
+          passed=$(jq '.summary.passed // 0' checkov-results.json 2>/dev/null || echo "0")
+          failed=$(jq '.summary.failed // 0' checkov-results.json 2>/dev/null || echo "0")
+          skipped=$(jq '.summary.skipped // 0' checkov-results.json 2>/dev/null || echo "0")
+
+          # Count high and critical issues
+          high_critical=$(jq '[.results.failed_checks[]? | select(.severity == "HIGH" or .severity == "CRITICAL")] | length' checkov-results.json 2>/dev/null || echo "0")
+
+          if [[ $failed -gt 0 ]]; then
+            if [[ $high_critical -gt 0 ]]; then
+              echo "summary=Checkov: ❌ $failed failed ($high_critical critical/high), ✅ $passed passed, ⏭️ $skipped skipped" >> "$GITHUB_OUTPUT"
+            else
+              echo "summary=Checkov: ⚠️ $failed failed, ✅ $passed passed, ⏭️ $skipped skipped" >> "$GITHUB_OUTPUT"
+            fi
+
+            # Create formatted output for critical/high issues
+            if [[ $high_critical -gt 0 ]]; then
+              echo "**🚨 Critical/High Severity Issues:**" > checkov.formatted.txt
+              jq -r '.results.failed_checks[]? | select(.severity == "HIGH" or .severity == "CRITICAL") | "- **\(.severity)**: \(.check_name) in `\(.file_path):\(.file_line_range[0]// \"unknown\")`"' checkov-results.json >> checkov.formatted.txt 2>/dev/null || true
+              echo "" >> checkov.formatted.txt
+            fi
+          else
+            echo "summary=Checkov: ✅ $passed passed, ⏭️ $skipped skipped" >> "$GITHUB_OUTPUT"
+          fi
+        else
+          echo "summary=Checkov: ✅ Scan completed" >> "$GITHUB_OUTPUT"
+        fi
 
     - if: ${{ inputs.plan-encrypt != '' && steps.plan.outcome == 'success' }}
       env:
@@ -321,7 +442,7 @@ runs:
     - if: ${{ !cancelled() && steps.identifier.outcome == 'success' && contains(fromJSON('["plan", "apply", "init"]'), inputs.command) }}
       id: post
       env:
-        exitcode: ${{ steps.apply.outputs.exit_code || steps.plan.outputs.exit_code || steps.validate.outputs.exit_code || steps.initialize.outputs.exit_code || steps.format.outputs.exit_code }}
+        exitcode: ${{ steps.apply.outputs.exit_code || steps.plan.outputs.exit_code || steps.validate.outputs.exit_code || steps.initialize.outputs.exit_code || steps.format.outputs.exit_code || steps.tflint.outputs.exit_code || steps.checkov.outputs.exit_code }}
         GH_MATRIX: ${{ toJSON(matrix) }}
         INPUTS_COMMENT_PR: ${{ inputs.comment-pr }}
         INPUTS_EXPAND_DIFF: ${{ inputs.expand-diff }}
@@ -430,6 +551,49 @@ runs:
           diff=""
         fi
 
+        # Add TFLint section
+        if [[ -s tflint.console.txt && "${{ inputs.tflint-scan }}" == "true" ]]; then
+          tflint_summary="${{ steps.tflint.outputs.summary }}"
+          tflint_console=$(head --bytes=20000 tflint.console.txt)
+          if [[ ${#tflint_console} -eq 20000 ]]; then tflint_console="${tflint_console}"$'\n…'; fi
+
+          tflint_section="
+        <details${{ inputs.expand-tflint == 'true' && ' open' || '' }}><summary>🔍 Linting Results: ${tflint_summary}</summary>
+
+        \`\`\`hcl
+        ${tflint_console}
+        \`\`\`
+        </details>"
+        else
+          tflint_section=""
+        fi
+
+        # Add Checkov section
+        if [[ -s checkov.console.txt && "${{ inputs.checkov-scan }}" == "true" ]]; then
+          checkov_summary="${{ steps.checkov.outputs.summary }}"
+          checkov_console=$(head --bytes=20000 checkov.console.txt)
+          if [[ ${#checkov_console} -eq 20000 ]]; then checkov_console="${checkov_console}"$'\n…'; fi
+
+          # Include critical/high issues if they exist
+          checkov_issues=""
+          if [[ -s checkov.formatted.txt ]]; then
+            checkov_issues="$(cat checkov.formatted.txt)"
+          fi
+
+          checkov_section="
+        <details${{ inputs.expand-checkov == 'true' && ' open' || '' }}><summary>🔒 Security Scan: ${checkov_summary}</summary>
+
+        ${checkov_issues:+${checkov_issues}
+        
+        }
+        \`\`\`
+        ${checkov_console}
+        \`\`\`
+        </details>"
+        else
+          checkov_section=""
+        fi
+
         # Set flags for creating PR comment and tagging actor.
         create_comment=""
         tag_actor=""
@@ -447,6 +611,8 @@ runs:
         \`\`\`
         <!-- placeholder-2 -->
         ${diff}
+        ${tflint_section}
+        ${checkov_section}
         <!-- placeholder-3 -->
         <details${{ env.INPUTS_EXPAND_SUMMARY == 'true' && ' open' || '' }}><summary>${summary}</br>
 
@@ -474,7 +640,7 @@ runs:
         fi
 
         # Clean up files.
-        rm --force tf.command.txt tf.console.txt tf.diff.txt
+        rm --force tf.command.txt tf.console.txt tf.diff.txt tflint.command.txt tflint.console.txt tflint.clean.txt checkov.command.txt checkov.console.txt checkov-results.json checkov.formatted.txt
 
         # Check if the PR contains a bot comment with the same identifier.
         list_comments=$(gh api /repos/${{ github.repository }}/issues/${{ steps.identifier.outputs.pr }}/comments --header "$GH_API" --method GET --paginate)
@@ -529,7 +695,7 @@ outputs:
     value: ${{ steps.post.outputs.diff }}
   exitcode:
     description: "Exit code of the last TF command."
-    value: ${{ steps.apply.outputs.exit_code || steps.plan.outputs.exit_code || steps.validate.outputs.exit_code || steps.initialize.outputs.exit_code || steps.format.outputs.exit_code }}
+    value: ${{ steps.apply.outputs.exit_code || steps.plan.outputs.exit_code || steps.validate.outputs.exit_code || steps.initialize.outputs.exit_code || steps.format.outputs.exit_code || steps.tflint.outputs.exit_code || steps.checkov.outputs.exit_code }}
   identifier:
     description: "Unique name of the workflow run and artifact."
     value: ${{ steps.identifier.outputs.name }}
@@ -551,6 +717,22 @@ outputs:
   summary:
     description: "Summary of the last TF command."
     value: ${{ steps.post.outputs.summary }}
+
+  # TFLint outputs
+  tflint-exitcode:
+    description: "Exit code of TFLint scan."
+    value: ${{ steps.tflint.outputs.exit_code }}
+  tflint-summary:
+    description: "Summary of TFLint scan results."
+    value: ${{ steps.tflint.outputs.summary }}
+
+  # Checkov outputs
+  checkov-exitcode:
+    description: "Exit code of Checkov scan."
+    value: ${{ steps.checkov.outputs.exit_code }}
+  checkov-summary:
+    description: "Summary of Checkov scan results."
+    value: ${{ steps.checkov.outputs.summary }}
 
 inputs:
   # Action parameters.
@@ -633,6 +815,50 @@ inputs:
   working-directory:
     default: ""
     description: "Specify the working directory of TF code, alias of `arg-chdir` (e.g., `stacks/dev`)."
+    required: false
+
+  # TFLint parameters.
+  tflint-scan:
+    default: "false"
+    description: "Run TFLint scan (e.g., `true`)."
+    required: false
+  tflint-config:
+    default: ""
+    description: "Path to TFLint config file (e.g., `.tflint.hcl`)."
+    required: false
+  tflint-var-file:
+    default: ""
+    description: "Variable file for TFLint (e.g., `terraform.tfvars`)."
+    required: false
+  expand-tflint:
+    default: "false"
+    description: "Expand the collapsible TFLint section (e.g., `false`)."
+    required: false
+
+  # Checkov parameters.
+  checkov-scan:
+    default: "false"
+    description: "Run Checkov security scan (e.g., `true`)."
+    required: false
+  checkov-config:
+    default: ""
+    description: "Path to Checkov config file (e.g., `.checkov.yaml`)."
+    required: false
+  checkov-framework:
+    default: "terraform"
+    description: "Framework to scan with Checkov (e.g., `terraform`)."
+    required: false
+  checkov-quiet:
+    default: "false"
+    description: "Run Checkov in quiet mode (e.g., `false`)."
+    required: false
+  checkov-skip-check:
+    default: ""
+    description: "Comma-separated list of checks to skip (e.g., `CKV_AWS_1,CKV_AWS_2`)."
+    required: false
+  expand-checkov:
+    default: "false"
+    description: "Expand the collapsible Checkov section (e.g., `false`)."
     required: false
 
   # CLI arguments.

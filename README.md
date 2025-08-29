@@ -1,10 +1,10 @@
 [![Terraform Compatible](https://img.shields.io/badge/Terraform-Compatible-844FBA?logo=terraform&logoColor=white)](https://github.com/hashicorp/setup-terraform "Terraform Compatible.")
 [![OpenTofu Compatible](https://img.shields.io/badge/OpenTofu-Compatible-FFDA18?logo=opentofu&logoColor=white)](https://github.com/opentofu/setup-opentofu "OpenTofu Compatible.")
 *
-[![GitHub license](https://img.shields.io/github/license/op5dev/tf-via-pr?logo=apache&label=License)](LICENSE "Apache License 2.0.")
-[![GitHub release tag](https://img.shields.io/github/v/release/op5dev/tf-via-pr?logo=semanticrelease&label=Release)](https://github.com/op5dev/tf-via-pr/releases "View all releases.")
+[![GitHub license](https://img.shields.io/github/license/cloud303/tf-via-pr?logo=apache&label=License)](LICENSE "Apache License 2.0.")
+[![GitHub release tag](https://img.shields.io/github/v/release/cloud303/tf-via-pr?logo=semanticrelease&label=Release)](https://github.com/cloud303/tf-via-pr/releases "View all releases.")
 *
-[![GitHub repository stargazers](https://img.shields.io/github/stars/op5dev/tf-via-pr)](https://github.com/op5dev/tf-via-pr "Become a stargazer.")
+[![GitHub repository stargazers](https://img.shields.io/github/stars/cloud303/tf-via-pr)](https://github.com/cloud303/tf-via-pr "Become a stargazer.")
 
 # Terraform/OpenTofu via Pull Request (TF-via-PR)
 
@@ -69,7 +69,7 @@ jobs:
           terraform_wrapper: false
 
       # Run plan by default, or apply on merge.
-      - uses: op5dev/tf-via-pr@v13
+      - uses: cloud303/tf-via-pr@v1
         with:
           working-directory: path/to/directory
           command: ${{ github.event_name == 'push' && 'apply' || 'plan' }}
@@ -87,6 +87,163 @@ jobs:
 > - Recommend setting `terraform_wrapper`/`tofu_wrapper` to `false` in order to output the [detailed exit code](https://developer.hashicorp.com/terraform/cli/commands/plan#detailed-exitcode) for better error handling.
 
 </br>
+
+
+### TFlint + Checkov Scan
+This example includes TFlint outputs along with a checkov scan in the PR comment.
+
+It can be triggered manually via workflow dispatch as well as through a PR label.
+
+
+```yaml
+on:
+
+  # Manual trigger with command selection
+  workflow_dispatch:
+    inputs:
+      command:
+        description: TF command
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+        default: plan
+      lock:
+        description: Use TF lock? (Recommend using `true` when `command` is set to `apply`.)
+        required: false
+        type: boolean
+        default: true
+
+  # Auto Terraform Plan on PR
+  pull_request:
+    paths:
+      - environments/dev/**
+
+  # Auto Terraform Apply on merge or push to main
+  push:
+    branches: [main]
+    paths:
+      - environments/dev/**
+
+      
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_ROLE_TO_ASSUME: ${{ secrets.DEV_AWS_ROLE_TO_ASSUME }}
+  OVPN_USERNAME: ${{ secrets.OVPN_USERNAME }}
+  OVPN_PASSWORD: ${{ secrets.OVPN_PASSWORD }}
+  TF_PASSPHRASE: secrets.TF_ENCRYPT_KEY
+
+
+jobs:
+  provision:
+    # Skip if PR labeled but not with run-plan/run-apply labels
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && (
+        github.event.action != 'labeled' ||
+        contains(github.event.pull_request.labels.*.name, 'run-plan') ||
+        contains(github.event.pull_request.labels.*.name, 'run-apply')
+      ))
+
+    environment: dev
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write      # allow issuing GitHub’s OIDC tokens to this job
+      actions: read        # Required to identify workflow run.
+      checks: write        # Required to add status summary.
+      contents: read       # Required to checkout repository.
+      pull-requests: write # Required to add PR comment.
+
+    steps:
+      - uses: actions/checkout@v4
+
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.4
+          terraform_wrapper: false
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+
+      # Install Checkov  
+      - name: Setup Checkov
+        run: |
+          pip install checkov
+
+      # VPN required to access EKS private control plane
+      - name: Install OpenVPN
+        run: |
+          sudo apt update
+          sudo apt install -y openvpn openvpn-systemd-resolved
+
+      - name: Connect to VPN
+        uses: "kota65535/github-openvpn-connect-action@v2"
+        with:
+          config_file: .github/workflows/veruna-dev.ovpn
+          username: ${{ env.OVPN_USERNAME }}
+          password: ${{ env.OVPN_PASSWORD }}
+
+      # Determine terraform command based on workflow trigger type
+      - name: Determine Terraform command
+        id: tf-command
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "command=${{ inputs.command }}" >> $GITHUB_OUTPUT
+            echo "lock=${{ inputs.lock }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            echo "command=apply" >> $GITHUB_OUTPUT
+            echo "lock=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'run-apply') }}" == "true" ]]; then
+            echo "command=apply" >> $GITHUB_OUTPUT
+            echo "lock=true" >> $GITHUB_OUTPUT
+          else
+            echo "command=plan" >> $GITHUB_OUTPUT
+            echo "lock=false" >> $GITHUB_OUTPUT
+          fi
+
+      # Run plan by default, or apply on merge.
+      - uses: cloud303/tf-via-pr@v1
+        with:
+          working-directory: ./environments/dev
+          command: ${{ steps.tf-command.outputs.command }}
+          arg-lock: ${{ steps.tf-command.outputs.lock }}
+          plan-encrypt: ${{ env.TF_PASSPHRASE }}
+          validate: true
+          format: true
+          # Enable TFLint scanning
+          tflint-scan: true
+          # Enable Checkov security scanning  
+          checkov-scan: true
+
+      # Remove PR labels after execution if applicable
+      - name: Remove workflow labels
+        if: |
+          github.event_name == 'pull_request' && (
+            contains(github.event.pull_request.labels.*.name, 'run-plan') ||
+            contains(github.event.pull_request.labels.*.name, 'run-apply')
+          )
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.number }}
+        run: |
+          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'run-plan') }}" == "true" ]]; then
+            gh api /repos/${{ github.repository }}/issues/${PR_NUMBER}/labels/run-plan --method DELETE || true
+          fi
+          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'run-apply') }}" == "true" ]]; then
+            gh api /repos/${{ github.repository }}/issues/${PR_NUMBER}/labels/run-apply --method DELETE || true
+          fi
+```
+
 
 ### Where to find more examples?
 
@@ -189,6 +346,17 @@ All supported CLI argument inputs are [listed below](#arguments) with accompanyi
 | UI       | `tag-actor`         | Tag the workflow triggering actor: `always`, `on-diff`, or `never`.<sup>4</sup></br>Default: `always`                                     |
 | UI       | `hide-args`         | Hide comma-separated list of CLI arguments from the command input.<sup>6</sup></br>Default: `detailed-exitcode,parallelism,lock,out,var=` |
 | UI       | `show-args`         | Show comma-separated list of CLI arguments in the command input.<sup>6</sup></br>Default: `workspace`                                     |
+| UI       | `expand-validate`   | Expand the collapsible validation section.</br>Default: `false`                                                                             |
+| Check    | `tflint-scan`       | Run TFLint scan and include results in PR comment.</br>Default: `false`                                                                      |
+| Check    | `tflint-config`     | Path to TFLint config file.</br>Example: `.tflint.hcl`                                                                                       |
+| Check    | `tflint-var-file`   | Variable file for TFLint.</br>Example: `terraform.tfvars`                                                                                    |
+| UI       | `expand-tflint`     | Expand the collapsible TFLint section.</br>Default: `false`                                                                                  |
+| Security | `checkov-scan`      | Run Checkov security scan and include results in PR comment.</br>Default: `false`                                                            |
+| Security | `checkov-config`    | Path to Checkov config file.</br>Example: `.checkov.yaml`                                                                                    |
+| Security | `checkov-framework` | Framework to scan with Checkov.</br>Default: `terraform`                                                                                     |
+| Security | `checkov-quiet`     | Run Checkov in quiet mode.</br>Default: `false`                                                                                               |
+| Security | `checkov-skip-check`| Comma-separated list of checks to skip.</br>Example: `CKV_AWS_1,CKV_AWS_2`                                                                    |
+| UI       | `expand-checkov`    | Expand the collapsible Checkov section.</br>Default: `false`                                                                                 |
 
 </br>
 
@@ -287,6 +455,12 @@ Applicable only when `validate: true`.
 | Workflow | `job-id`       | ID of the workflow job.                       |
 | Workflow | `run-url`      | URL of the workflow run.                      |
 | Workflow | `identifier`   | Unique name of the workflow run and artifact. |
+| Check    | `validate-exitcode` | Exit code of Terraform validate.            |
+| Check    | `validate-summary`  | Summary of Terraform validate results.      |
+| Check    | `tflint-exitcode`   | Exit code of TFLint scan.                   |
+| Check    | `tflint-summary`    | Summary of TFLint scan results.             |
+| Security | `checkov-exitcode`  | Exit code of Checkov scan.                  |
+| Security | `checkov-summary`   | Summary of Checkov scan results.            |
 
 </br>
 
@@ -300,6 +474,17 @@ View [security policy and reporting instructions](SECURITY.md). Integrating secu
 > [!TIP]
 >
 > Pin your GitHub Action to a [commit SHA](https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-third-party-actions "Security hardening for GitHub Actions.") to harden your CI/CD **pipeline security** against supply chain attacks.
+
+</br>
+
+## Maintainers
+
+- Cloud303 Team (@cloud303) — primary maintainers
+- Rishav Dhar (@rdhar) — original author
+- Kyler Loucks (@cloud303-kloucks) — enhancements: TFLint, Checkov, validation/outputs
+
+## Contributors
+[![Contributors](https://contrib.rocks/image?repo=cloud303-kloucks/c303/TF-via-PR)](https://github.com/cloud303-kloucks/c303/TF-via-PR/graphs/contributors)
 
 </br>
 
@@ -328,5 +513,5 @@ View [all notable changes](https://github.com/op5dev/tf-via-pr/releases "Release
 ## License
 
 - This project is licensed under the permissive [Apache License 2.0](LICENSE "Apache License 2.0.").
-- All works herein are my own, shared of my own volition, and [contributors](https://github.com/op5dev/tf-via-pr/graphs/contributors "Contributors.").
-- Copyright 2016-present [Rishav Dhar](https://github.com/rdhar "Rishav Dhar's GitHub profile.") — All wrongs reserved.
+- See all [contributors](https://github.com/cloud303-kloucks/c303/TF-via-PR/graphs/contributors "Contributors.").
+- Portions © 2016-present [Rishav Dhar](https://github.com/rdhar "Rishav Dhar's GitHub profile."). Modifications © 2025 Kyler Loucks (Cloud303).
